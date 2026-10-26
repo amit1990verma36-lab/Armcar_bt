@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>ArmCar</title>
+<style>
+body{margin:0;padding:10px;background:#0b1220;color:#e6edf7;font-family:sans-serif;text-align:center}
+button{background:#1c2a44;color:#e6edf7;border:1px solid #33486f;border-radius:10px;padding:10px;font-size:15px;margin:3px}
+button.on{background:#2e7d4f;border-color:#58d68d}
+input[type=text]{width:90%;padding:8px;margin:4px 0;border-radius:8px;border:1px solid #33486f;background:#101a2e;color:#e6edf7;font-size:15px}
+#face{height:110px;display:flex;justify-content:center;align-items:center;gap:36px;background:#000;border-radius:16px;margin:8px 0}
+.eye{width:42px;height:60px;border-radius:21px;background:#6cf;animation:blink 4s infinite}
+#face.listen .eye{background:#7cffb2}
+#face.busy .eye{height:22px}
+#face.alert .eye{background:#ff6b6b}
+#face.happy .eye{height:26px;background:#7cffb2;border-radius:26px 26px 4px 4px;animation:none}
+@keyframes blink{0%,94%,100%{transform:scaleY(1)}97%{transform:scaleY(.1)}}
+#pad{display:grid;grid-template-columns:repeat(3,76px);gap:6px;justify-content:center;margin:8px 0}
+#pad button{height:60px;font-size:22px}
+.row{display:flex;align-items:center;gap:8px;margin:4px 0}
+.row label{width:80px;text-align:left;font-size:14px}
+.row input[type=range]{flex:1}
+#cam{display:none}
+#fv{width:100%;max-width:320px;border-radius:10px;transform:scaleX(-1);background:#000}
+#sim{width:100%;max-width:340px;background:#101a2e;border-radius:10px;touch-action:none}
+.card{border:1px solid #33486f;border-radius:12px;padding:8px;margin:10px 0}
+h3{margin:4px 0;font-size:16px}
+#fList div{margin:4px 0}
+</style>
+</head>
+<body>
+<div id="status">Bluetooth se connect karo</div>
+<div id="face"><div class="eye"></div><div class="eye"></div></div>
+<button id="bBle">Connect BLE</button>
+
+<div id="pad">
+  <span></span><button data-c="F">▲</button><span></span>
+  <button data-c="L">◀</button><button data-c="S">■</button><button data-c="R">▶</button>
+  <span></span><button data-c="B">▼</button><span></span>
+</div>
+<div class="row"><label>Speed</label><input type="range" id="spd" min="80" max="255" value="170"></div>
+
+<div id="arm"></div>
+<div>
+  <button onclick="cmd('G1')">Grip open</button>
+  <button onclick="cmd('G0')">Grip close</button>
+  <button onclick="cmd('HOME')">Home</button>
+  <button onclick="cmd('PICK')">Pick</button>
+  <button onclick="cmd('DROP')">Drop</button>
+</div>
+<div>
+  <button id="tAuto">Auto</button>
+  <button id="tVoice">Voice</button>
+  <button id="tGest">Gesture</button>
+  <button id="tTilt">Tilt</button>
+</div>
+<div id="heard" style="min-height:24px;margin:6px;color:#9fb3d6"></div>
+<video id="cam" playsinline muted></video>
+
+<div class="card">
+  <h3>Simulation + RL</h3>
+  <canvas id="sim" width="320" height="220"></canvas>
+  <div><label><input type="checkbox" id="simOnly"> Sim only (D-pad se sim robot chalao)</label></div>
+  <div>
+    <button id="bTrain">Train 300</button>
+    <button id="bWatch">Watch AI</button>
+    <button id="bMap">New map</button>
+    <button id="bReset">Reset AI</button>
+  </div>
+  <div>
+    <button id="bSend">Send to robot</button>
+    <button id="bRun">Robot AI on</button>
+    <button id="bSave">Save</button>
+    <button id="bLoad">Load</button>
+  </div>
+  <div id="rlInfo" style="font-size:13px;color:#9fb3d6;min-height:34px"></div>
+</div>
+
+<div class="card">
+  <h3>Face greet (pehchaan + hello)</h3>
+  <div id="fStat" style="font-size:13px;color:#9fb3d6;min-height:20px">Face ON dabao</div>
+  <video id="fv" playsinline muted></video>
+  <div>
+    <button id="fCam">Face ON</button>
+    <button id="fShot">Camera se photo lo</button>
+  </div>
+  <input type="text" id="fName" placeholder="Naam likho (jaise Rahul bhaiya)">
+  <div style="margin:6px 0">Ya gallery se photos: <input type="file" id="fFiles" accept="image/*" multiple></div>
+  <div id="fSay" style="min-height:22px;color:#7cffb2"></div>
+  <div id="fSeen" style="min-height:22px;color:#9fb3d6"></div>
+  <div id="fList"></div>
+  <input type="text" id="fTpl" value="Hello {name}!">
+  <div><label><input type="checkbox" id="fWave"> Greeting par arm wave kare</label></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const RXU = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+const TXU = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+const enc = new TextEncoder(), dec = new TextDecoder();
+let bleDev = null, bleRx = null, bleQ = [], bleBusy = false;
+let docked = false, realIR = [0, 0], simOnly = false;
+
+function setStatus(t){ $('status').textContent = t; }
+function info(t){ $('rlInfo').textContent = t; }
+function face(c){ $('face').className = c || ''; }
+function speak(t){
+  if(!window.speechSynthesis) return;
+  const u = new SpeechSynthesisUtterance(t); u.lang = 'hi-IN'; speechSynthesis.speak(u);
+}
+function linked(){ return !!bleRx; }
+
+async function bleSend(c){
+  if(c[0] === 'A'){
+    const i = bleQ.findIndex(x => x.startsWith(c.slice(0, 3)));
+    if(i > -1){ bleQ[i] = c; return; }
+  }
+  if(c === 'H' && bleQ.length) return;
+  bleQ.push(c);
+  if(bleBusy) return;
+  bleBusy = true;
+  while(bleQ.length){
+    const m = bleQ.shift();
+    try{
+      if(/^Q\d+:/.test(m)) await bleRx.writeValueWithResponse(enc.encode(m));
+      else await bleRx.writeValueWithoutResponse(enc.encode(m));
+    }catch(e){}
+  }
+  bleBusy = false;
+}
+
+$('bBle').onclick = async () => {
+  if(bleDev && bleDev.gatt.connected){ bleDev.gatt.disconnect(); return; }
+  if(!navigator.bluetooth){ alert('Android Chrome use karo'); return; }
+  try{
+    bleDev = await navigator.bluetooth.requestDevice({
+      filters: [{name: 'ArmCar'}], optionalServices: [SERVICE]
+    });
+    bleDev.addEventListener('gattserverdisconnected', () => {
+      bleRx = null; bleQ = [];
+      setStatus('BLE disconnected'); $('bBle').textContent = 'Connect BLE';
+    });
+    const s = await bleDev.gatt.connect();
+    const svc = await s.getPrimaryService(SERVICE);
+    bleRx = await svc.getCharacteristic(RXU);
+    const tx = await svc.getCharacteristic(TXU);
+    await tx.startNotifications();
+    tx.addEventListener('characteristicvaluechanged', e => onMsg(dec.decode(e.target.value)));
+    $('bBle').textContent = 'Disconnect BLE';
+    setStatus('Connected (BLE)');
+    raw('?'); raw('V' + $('spd').value);
+    speak('Connect ho gaya');
+  }catch(e){ setStatus('BLE error: ' + e.message); }
+};
+
+function raw(c){ if(bleRx) bleSend(c); }
+setInterval(() => { if(bleRx) bleSend('H'); }, 500);
+
+function send(c){
+  if(simOnly){ simCmd(c); return; }
+  raw(c);
+}
+function cmd(c){ send(c); if(c === 'PICK' || c === 'DROP') face('busy'); }
+
+const lastA = {};
+function sendA(i, v){
+  const now = Date.now();
+  clearTimeout(lastA['t' + i]);
+  if(now - (lastA[i] || 0) < 40){
+    lastA['t' + i] = setTimeout(() => raw(`A${i}:${v}`), 40);
+    return;
+  }
+  lastA[i] = now;
+  raw(`A${i}:${v}`);
+}
+
+function onMsg(m){
+  m = m.trim();
+  if(m.startsWith('IR:')){ realIR = [+m[3], +m[4]]; }
+  else if(m === 'DOCK:1'){ docked = true; setStatus('Connected | Phone docked'); }
+  else if(m === 'DOCK:0'){ docked = false; setStatus('Connected | Phone undocked'); }
+  else if(m === 'OBS'){ face('alert'); if(navigator.vibrate) navigator.vibrate(200); setTimeout(() => face(), 800); }
+  else if(m === 'ARM:DONE'){ face(); }
+  else if(m === 'QT:OK'){ info('Policy robot mein save ho gayi'); }
+  else if(m === 'ERR:NOPOLICY'){ info('Robot mein policy nahi hai, pehle Send to robot dabao'); }
+}
+
+document.querySelectorAll('#pad button').forEach(b => {
+  const c = b.dataset.c;
+  b.addEventListener('pointerdown', e => { e.preventDefault(); send(c); });
+  const stop = () => { if(c !== 'S') send('S'); };
+  b.addEventListener('pointerup', stop);
+  b.addEventListener('pointerleave', stop);
+  b.addEventListener('pointercancel', stop);
+});
+$('spd').oninput = e => raw('V' + e.target.value);
+
+['Base','Shoulder','Elbow','Wrist','Gripper'].forEach((n, i) => {
+  const d = document.createElement('div');
+  d.className = 'row';
+  d.innerHTML = `<label>${n}</label><input type="range" min="0" max="180" value="90">`;
+  d.querySelector('input').oninput = e => sendA(i, e.target.value);
+  $('arm').appendChild(d);
+});
+
+let autoOn = false;
+$('tAuto').onclick = () => {
+  autoOn = !autoOn;
+  $('tAuto').classList.toggle('on', autoOn);
+  raw(autoOn ? 'AUTO1' : 'AUTO0');
+};
+
+let voiceOn = false, rec = null;
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+function voice(t){
+  $('heard').textContent = t;
+  const has = r => r.test(t);
+  let c = null;
+  if(has(/stop|ruk|रुक|रोक/)) c = 'S';
+  else if(has(/aage|aagey|forward|आगे/)) c = 'F';
+  else if(has(/peeche|pichhe|back|पीछे/)) c = 'B';
+  else if(has(/left|baen|bayen|बाएं|बायें|बाये/)) c = 'L';
+  else if(has(/right|daen|dayen|दाएं|दायें|दाये/)) c = 'R';
+  else if(has(/pakd|pakad|pick|grab|पकड/)) c = 'PICK';
+  else if(has(/chhod|chod|drop|छोड/)) c = 'DROP';
+  else if(has(/home|ghar|घर/)) c = 'HOME';
+  else if(has(/khol|open|खोल/)) c = 'G1';
+  else if(has(/band|close|बंद/)) c = 'G0';
+  else if(has(/manual|मैनुअल/)) c = 'AUTO0';
+  else if(has(/auto|ऑटो|आटो/)) c = 'AUTO1';
+  if(!c) return;
+  cmd(c);
+  if(c.length === 1 && 'FBLR'.includes(c)) setTimeout(() => send('S'), 2000);
+  speak('Theek hai');
+}
+$('tVoice').onclick = () => {
+  if(!SR){ alert('Chrome Android use karo'); return; }
+  voiceOn = !voiceOn;
+  $('tVoice').classList.toggle('on', voiceOn);
+  if(voiceOn){
+    rec = new SR(); rec.lang = 'hi-IN'; rec.continuous = true; rec.interimResults = false;
+    rec.onresult = e => voice(e.results[e.results.length - 1][0].transcript.toLowerCase());
+    rec.onend = () => { if(voiceOn) try{ rec.start(); }catch(e){} };
+    rec.onerror = e => { $('heard').textContent = 'Voice error: ' + e.error; };
+    rec.start(); face('listen');
+  } else { rec.stop(); face(); }
+};
+
+let gestOn = false, hands = null, camUtil = null, lastG = -1, cnt = 0;
+const GMAP = {0:'S', 1:'F', 2:'B', 3:'L', 4:'R'};
+function fingers(lm){
+  return [[8,6],[12,10],[16,14],[20,18]].filter(([t,p]) => lm[t].y < lm[p].y).length;
+}
+$('tGest').onclick = () => {
+  if(typeof Hands === 'undefined'){ alert('Gesture ke liye internet chahiye'); return; }
+  gestOn = !gestOn;
+  $('tGest').classList.toggle('on', gestOn);
+  if(gestOn){
+    if(fCamOn) stopFace();
+    if(!hands){
+      hands = new Hands({locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
+      hands.setOptions({maxNumHands: 1, modelComplexity: 0, minDetectionConfidence: .6, minTrackingConfidence: .5});
+      hands.onResults(r => {
+        if(!gestOn) return;
+        let g = 0;
+        if(r.multiHandLandmarks && r.multiHandLandmarks.length) g = fingers(r.multiHandLandmarks[0]);
+        if(g === lastG){ cnt++; } else { lastG = g; cnt = 0; }
+        if(cnt === 3){ send(GMAP[g]); $('heard').textContent = 'Gesture: ' + g + ' ungli'; }
+      });
+      camUtil = new Camera($('cam'), {
+        onFrame: async () => { if(gestOn) await hands.send({image: $('cam')}); },
+        width: 320, height: 240, facingMode: 'user'
+      });
+    }
+    camUtil.start();
+  } else { send('S'); if(camUtil) camUtil.stop(); }
+};
+
+let tiltOn = false, b0 = null, g0 = 0, lastT = 'S';
+function onTilt(e){
+  if(b0 === null){ b0 = e.beta; g0 = e.gamma; return; }
+  const dy = e.beta - b0, dx = e.gamma - g0;
+  let c = 'S';
+  if(dy < -20) c = 'F'; else if(dy > 20) c = 'B';
+  else if(dx < -20) c = 'L'; else if(dx > 20) c = 'R';
+  if(c !== lastT){ lastT = c; send(c); }
+}
+$('tTilt').onclick = async () => {
+  tiltOn = !tiltOn;
+  $('tTilt').classList.toggle('on', tiltOn);
+  if(tiltOn){
+    if(window.DeviceOrientationEvent && DeviceOrientationEvent.requestPermission) await DeviceOrientationEvent.requestPermission();
+    b0 = null;
+    window.addEventListener('deviceorientation', onTilt);
+  } else {
+    window.removeEventListener('deviceorientation', onTilt);
+    send('S');
+  }
+};
+
+/* ---------- Simulation + Q-learning ---------- */
+const cv = $('sim'), cx = cv.getContext('2d');
+const W = 320, H = 220, R = 10, STEP = 4, TURN = 0.35, SLEN = 32, SANG = 0.7;
+const Q = new Float32Array(64);
+let obs = [], bot = {x:160, y:195, a:-Math.PI/2};
+let lastAct = 0, simMode = 'manual', manualAct = -1;
+let trained = 0, hist = [], colls = 0, steps = 0, training = false;
+
+function makeWorld(){
+  obs = [];
+  for(let i = 0; i < 7; i++) obs.push({x: 40 + Math.random()*(W-80), y: 30 + Math.random()*(H-90), r: 12 + Math.random()*10});
+  resetBot();
+}
+function resetBot(){
+  bot = {x: W/2, y: H - 25, a: -Math.PI/2};
+  obs = obs.filter(o => Math.hypot(o.x - bot.x, o.y - bot.y) > o.r + R + 25);
+  lastAct = 0; steps = 0;
+}
+function hit(x, y, rad){
+  if(x < rad || x > W - rad || y < rad || y > H - rad) return true;
+  for(const o of obs) if(Math.hypot(o.x - x, o.y - y) < o.r + rad) return true;
+  return false;
+}
+function ray(ang){
+  for(let d = R; d <= R + SLEN; d += 3){
+    if(hit(bot.x + Math.cos(ang)*d, bot.y + Math.sin(ang)*d, 1)) return 1;
+  }
+  return 0;
+}
+function sense(){ return [ray(bot.a - SANG), ray(bot.a + SANG)]; }
+function state(){ const s = sense(); return ((s[0] << 1) | s[1]) * 4 + lastAct; }
+
+function stepSim(act){
+  const s = sense();
+  let rew = 0;
+  if(act === 0 || act === 3){
+    const d = act === 0 ? STEP : -STEP * 0.7;
+    const nx = bot.x + Math.cos(bot.a)*d, ny = bot.y + Math.sin(bot.a)*d;
+    if(hit(nx, ny, R)){ rew = -10; colls++; }
+    else { bot.x = nx; bot.y = ny; rew = act === 0 ? ((s[0] || s[1]) ? 0.2 : 1) : -0.5; }
+  } else {
+    bot.a += (act === 1 ? -TURN : TURN);
+    rew = -0.3;
+  }
+  return rew;
+}
+function best(s){
+  let b = 0;
+  for(let i = 1; i < 4; i++) if(Q[s*4 + i] > Q[s*4 + b]) b = i;
+  return b;
+}
+function maxQ(s){ return Q[s*4 + best(s)]; }
+
+function train(n){
+  if(training) return;
+  training = true;
+  let k = 0;
+  function chunk(){
+    for(let c = 0; c < 20 && k < n; c++, k++){
+      makeWorld(); colls = 0;
+      let tot = 0, s = state();
+      const eps = Math.max(0.05, 1 - trained / 400);
+      for(let t = 0; t < 250; t++){
+        const a = Math.random() < eps ? (Math.random()*4 | 0) : best(s);
+        const rw = stepSim(a);
+        lastAct = a;
+        const s2 = state();
+        Q[s*4 + a] += 0.2 * (rw + 0.9 * maxQ(s2) - Q[s*4 + a]);
+        s = s2; tot += rw;
+      }
+      trained++;
+      hist.push([tot, colls]);
+    }
+    const last = hist.slice(-20);
+    const avg = last.reduce((a, b) => a + b[0], 0) / last.length;
+    const ac = last.reduce((a, b) => a + b[1], 0) / last.length;
+    info(`Episodes: ${trained} | reward (last 20): ${avg.toFixed(1)} | takraav/episode: ${ac.toFixed(1)}`);
+    if(k < n) setTimeout(chunk, 0);
+    else { training = false; makeWorld(); }
+  }
+  chunk();
+}
+
+function simCmd(c){
+  simMode = 'manual';
+  manualAct = ({F:0, L:1, R:2, B:3, S:-1})[c];
+  if(manualAct === undefined) manualAct = -1;
+}
+
+function draw(){
+  cx.clearRect(0, 0, W, H);
+  cx.fillStyle = '#44506a';
+  for(const o of obs){ cx.beginPath(); cx.arc(o.x, o.y, o.r, 0, 6.3); cx.fill(); }
+  const s = sense();
+  [[-SANG, s[0]], [SANG, s[1]]].forEach(([off, h]) => {
+    cx.strokeStyle = h ? '#ff6b6b' : '#7cffb2';
+    cx.beginPath();
+    cx.moveTo(bot.x, bot.y);
+    cx.lineTo(bot.x + Math.cos(bot.a + off)*(R + SLEN), bot.y + Math.sin(bot.a + off)*(R + SLEN));
+    cx.stroke();
+  });
+  cx.fillStyle = '#6cf';
+  cx.beginPath(); cx.arc(bot.x, bot.y, R, 0, 6.3); cx.fill();
+  cx.strokeStyle = '#fff'; cx.lineWidth = 2;
+  cx.beginPath(); cx.moveTo(bot.x, bot.y);
+  cx.lineTo(bot.x + Math.cos(bot.a)*R, bot.y + Math.sin(bot.a)*R); cx.stroke();
+  cx.lineWidth = 1;
+  cx.fillStyle = '#9fb3d6'; cx.font = '11px sans-serif';
+  cx.fillText('Real IR: ' + (realIR[0] ? 'L ' : '- ') + (realIR[1] ? 'R' : '-'), 6, 14);
+}
+
+setInterval(() => {
+  if(training) return;
+  let a = -1;
+  if(simMode === 'policy'){
+    a = best(state());
+    steps++;
+    if(steps > 500) makeWorld();
+  } else a = manualAct;
+  if(a >= 0){ stepSim(a); lastAct = a; }
+  draw();
+}, 120);
+
+$('simOnly').onchange = e => {
+  simOnly = e.target.checked;
+  if(simOnly){ raw('S'); simMode = 'manual'; manualAct = -1; }
+};
+$('bTrain').onclick = () => train(300);
+$('bWatch').onclick = () => { makeWorld(); simMode = 'policy'; };
+$('bMap').onclick = () => { makeWorld(); };
+$('bReset').onclick = () => { Q.fill(0); trained = 0; hist = []; info('AI reset ho gaya'); };
+$('bSend').onclick = () => {
+  if(!linked()){ info('Pehle robot se connect karo'); return; }
+  for(let r = 0; r < 16; r++){
+    const row = [0, 1, 2, 3].map(j => Q[r*4 + j].toFixed(2)).join(',');
+    raw('Q' + r + ':' + row);
+  }
+  info('Policy bhej raha hoon...');
+};
+let robotAI = false;
+$('bRun').onclick = () => {
+  robotAI = !robotAI;
+  $('bRun').textContent = robotAI ? 'Robot AI off' : 'Robot AI on';
+  $('bRun').classList.toggle('on', robotAI);
+  raw(robotAI ? 'POL1' : 'POL0');
+};
+$('bSave').onclick = () => { localStorage.setItem('armcarQ', JSON.stringify(Array.from(Q))); info('Phone mein save ho gaya'); };
+$('bLoad').onclick = () => {
+  const d = localStorage.getItem('armcarQ');
+  if(!d){ info('Koi saved AI nahi mili'); return; }
+  JSON.parse(d).forEach((v, i) => Q[i] = v);
+  info('Saved AI load ho gayi');
+};
+makeWorld();
+
+/* ---------- Face greet ---------- */
+const FMODEL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
+let fReady = false, fLoading = false, fCamOn = false, fStream = null, fLoopOn = false;
+let people = {}, matcher = null, waving = false;
+const lastGreet = {};
+
+function fMsg(t){ $('fStat').textContent = t; }
+function fOpts(){ return new faceapi.TinyFaceDetectorOptions({inputSize: 320, scoreThreshold: 0.5}); }
+
+function loadPeople(){
+  try{ people = JSON.parse(localStorage.getItem('armcarFaces') || '{}'); }catch(e){ people = {}; }
+}
+function buildMatcher(){
+  const labeled = Object.entries(people)
+    .filter(([n, d]) => d.length)
+    .map(([n, d]) => new faceapi.LabeledFaceDescriptors(n, d.map(a => new Float32Array(a))));
+  matcher = labeled.length ? new faceapi.FaceMatcher(labeled, 0.5) : null;
+}
+function savePeople(){
+  localStorage.setItem('armcarFaces', JSON.stringify(people));
+  if(fReady) buildMatcher();
+  renderPeople();
+}
+function renderPeople(){
+  const el = $('fList');
+  el.innerHTML = '';
+  const ks = Object.keys(people);
+  if(!ks.length){ el.textContent = 'Abhi koi nahi jura'; return; }
+  ks.forEach(n => {
+    const d = document.createElement('div');
+    d.textContent = `${n} (${people[n].length} photo) `;
+    const b = document.createElement('button');
+    b.textContent = 'Hatao';
+    b.onclick = () => { delete people[n]; savePeople(); };
+    d.appendChild(b);
+    el.appendChild(d);
+  });
+}
+
+function loadScript(src){
+  return new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = res;
+    s.onerror = () => rej(new Error('script load nahi hua'));
+    document.head.appendChild(s);
+  });
+}
+async function ensureFace(){
+  if(fReady) return true;
+  if(fLoading) return false;
+  fLoading = true;
+  try{
+    fMsg('Face library load ho rahi hai (pehli baar thoda time lagta hai)...');
+    if(typeof faceapi === 'undefined') await loadScript('https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js');
+    await faceapi.nets.tinyFaceDetector.loadFromUri(FMODEL);
+    await faceapi.nets.faceLandmark68Net.loadFromUri(FMODEL);
+    await faceapi.nets.faceRecognitionNet.loadFromUri(FMODEL);
+    buildMatcher();
+    fReady = true;
+    fMsg('Taiyaar');
+  }catch(e){ fMsg('Load error: ' + e.message + ' (internet check karo)'); }
+  fLoading = false;
+  return fReady;
+}
+
+async function descFrom(img){
+  const r = await faceapi.detectSingleFace(img, fOpts()).withFaceLandmarks().withFaceDescriptor();
+  return r ? Array.from(r.descriptor) : null;
+}
+
+$('fCam').onclick = async () => {
+  if(fCamOn){ stopFace(); return; }
+  if(gestOn) $('tGest').click();
+  if(!(await ensureFace())) return;
+  try{
+    fStream = await navigator.mediaDevices.getUserMedia({video: {facingMode: 'user', width: 320, height: 240}, audio: false});
+    $('fv').srcObject = fStream;
+    await $('fv').play();
+    fCamOn = true;
+    $('fCam').textContent = 'Face OFF';
+    $('fCam').classList.add('on');
+    fMsg('Camera chalu');
+    faceLoop();
+  }catch(e){ fMsg('Camera error: ' + e.message); }
+};
+function stopFace(){
+  fCamOn = false;
+  if(fStream) fStream.getTracks().forEach(t => t.stop());
+  fStream = null;
+  $('fv').srcObject = null;
+  $('fCam').textContent = 'Face ON';
+  $('fCam').classList.remove('on');
+  $('fSeen').textContent = '';
+}
+
+async function faceLoop(){
+  if(fLoopOn) return;
+  fLoopOn = true;
+  while(fCamOn){
+    if(fReady && matcher){
+      try{
+        const res = await faceapi.detectAllFaces($('fv'), fOpts()).withFaceLandmarks().withFaceDescriptors();
+        const names = [];
+        for(const x of res){
+          const m = matcher.findBestMatch(x.descriptor);
+          if(m.label !== 'unknown'){ names.push(m.label); greet(m.label); }
+        }
+        $('fSeen').textContent = res.length ? ('Dikha: ' + (names.join(', ') || 'anjaan')) : 'Koi nahi dikha';
+      }catch(e){}
+    } else if(fReady){
+      $('fSeen').textContent = 'Pehle kisi ko jodo';
+    }
+    await new Promise(r => setTimeout(r, 600));
+  }
+  fLoopOn = false;
+}
+
+function greet(name){
+  const now = Date.now();
+  if(now - (lastGreet[name] || 0) < 30000) return;
+  lastGreet[name] = now;
+  const txt = $('fTpl').value.replace('{name}', name);
+  $('fSay').textContent = txt;
+  face('happy');
+  setTimeout(() => face(), 3000);
+  speak(txt);
+  if($('fWave').checked) wave();
+}
+
+async function wave(){
+  if(!bleRx || waving) return;
+  waving = true;
+  for(const a of [60, 120, 60, 120, 90]){
+    raw('A3:' + a);
+    await new Promise(r => setTimeout(r, 450));
+  }
+  waving = false;
+}
+
+$('fShot').onclick = async () => {
+  const n = $('fName').value.trim();
+  if(!n){ fMsg('Pehle naam likho'); return; }
+  if(!fReady || !fCamOn){ fMsg('Pehle Face ON karo'); return; }
+  const d = await descFrom($('fv'));
+  if(!d){ fMsg('Chehra nahi dikha, saamne se dobara try karo'); return; }
+  (people[n] = people[n] || []).push(d);
+  savePeople();
+  fMsg(n + ': ' + people[n].length + ' photo jud gayi');
+};
+
+$('fFiles').onchange = async e => {
+  const n = $('fName').value.trim();
+  if(!n){ fMsg('Pehle naam likho'); e.target.value = ''; return; }
+  if(!(await ensureFace())){ return; }
+  let ok = 0, bad = 0;
+  for(const f of e.target.files){
+    try{
+      const img = await faceapi.bufferToImage(f);
+      const d = await descFrom(img);
+      if(d){ (people[n] = people[n] || []).push(d); ok++; } else bad++;
+    }catch(err){ bad++; }
+  }
+  savePeople();
+  e.target.value = '';
+  fMsg(`${n}: ${ok} photo judi, ${bad} mein chehra nahi mila`);
+};
+
+loadPeople();
+renderPeople();
+</script>
+</body>
+</html>
